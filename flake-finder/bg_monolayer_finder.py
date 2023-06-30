@@ -59,10 +59,8 @@ avg_rgb = np.mean(flake_colors_rgb, axis=0)
 output_dir = 'cv_output'
 threadsave=8 #number of threads NOT allocated when running
 boundflag=1
-t_rgb_dist = 8
+t_rgb_dist = 8# 8
 t_hue_dist = 12 #12
-t_red_dist = 12
-t_red_cutoff = 0.1 #fraction of the chunked image that must be more blue than red to be binned
 t_color_match_count = 0.000225 #fraction of image that must look like monolayers
 k = 4
 t_min_cluster_pixel_count = 30*(k/4)**2  # flake too small
@@ -89,9 +87,9 @@ def rgbfunc(rgbarr):
     red=rgbarr[0]
     green=rgbarr[1]
     blue=rgbarr[2]
-    rval=int(round(0.8643*red-2.55,0))
-    gval=int(round(0.8601*green+9.6765,0))
-    bval=blue+4
+    rval=int(round(0.8643*red-2.55,0))#int(round(0.8643*red-6,0))
+    gval=int(round(0.8601*green+9.6765,0))#int(round(0.8601*green+8,0))
+    bval=blue+2
     #print('coloring')
     return np.array([rval,gval,bval])
 def run_file(img_filepath,outputdir,scanposdict,bgs,dims):
@@ -108,12 +106,14 @@ def run_file(img_filepath,outputdir,scanposdict,bgs,dims):
     imsmall = cv2.resize(img.copy(), dsize=(256 * k, 171 * k)).reshape(-1,3)
     #test=np.sign(img_pixels-lowlim)+np.sign(highlim-img_pixels)
     #pixout=img_pixels*np.sign(test+abs(test)) #chooses pixels between provided limits
+    #pixout=img_pixels*np.sign(test+abs(test)) #chooses pixels between provided limits
     #test=np.sign(imsmall-lowlim)+np.sign(highlim-imsmall)
     #pixout=imsmall*np.sign(test+abs(test)) #chooses pixels between provided limits
     #if len(pixout)==0:
-        #print('Pixel failed')
+        #print('Pixel failed'))
         #return
-    backrgb=rgb_get(img_filepath,scanposdict,bgs,dims)
+    posx2,posy2,backrgb=rgb_get(img_filepath,scanposdict,bgs,dims)
+    #print(backrgb)
     # backbgr=[backrgb[2],backrgb[1],backrgb[0]]
     # img_pixels_offset=img0_pixels-backbgr
     # savimg=img_pixels_offset.reshape(h,w,3)
@@ -139,7 +139,7 @@ def run_file(img_filepath,outputdir,scanposdict,bgs,dims):
          #print('Count failed',t_count)
          return
     print(f"{img_filepath} meets count thresh with {t_count}")
-    pixdark=np.sum((img_pixels[:,2]<25)*(img_pixels[:,1]<25)*(img_pixels[:,0]<25))
+    pixdark=np.sum((img_pixels[:,2]<40)*(img_pixels[:,1]<40)*(img_pixels[:,0]<40))
     if np.sum(pixdark)/len(img_pixels) > 0.1: #edge detection, if more than 10% of the image is too dark, return
         print(f"{img_filepath} was on an edge!")
         return
@@ -284,7 +284,8 @@ def run_file(img_filepath,outputdir,scanposdict,bgs,dims):
         splits=img_filepath.split("stage")
     imname=splits[1]
     num=os.path.splitext(imname)[0]
-    
+    posstr="X:"+str(round(1000*posx2,2))+", Y:"+str(round(1000*posy2,2))
+    img0=cv2.putText(img0, posstr, (100,100), cv2.FONT_HERSHEY_SIMPLEX,3, (0,0,0), 2, cv2.LINE_AA)
     img4=img0.copy()
     for p in patches:
         print(p)
@@ -294,34 +295,25 @@ def run_file(img_filepath,outputdir,scanposdict,bgs,dims):
         x_max = int(p[1]+p[3]-2*offset*bscale/3) #note that the offsets cancel here
         print(x_min,y_min,x_max,y_max)
         bounds=[max(0,p[1]),min(p[1]+p[3],int(h)),max(0,p[0]),min(p[0]+p[2],int(w))]
-        #imchunk=img[x_min:x_max,y_min:y_max]#[pix for pix in dbscan_img2 if (pix[0]>=x.min() and pix[0]<=x.max() and pix[1]>=y.min() and pix[1]<=y.max())]
-        imchunk=img[bounds[0]:bounds[1],bounds[2]:bounds[3]]
-        flakergb,indices,farea=edgefind(imchunk,avg_rgb,pixcals)
-        print('Edge found')
+        imchunk=img[bounds[0]:bounds[1],bounds[2]:bounds[3]] #identifying bounding box of flake
         xarr=[]
         yarr=[]
         width=round(p[2]*pixcal,1)
         height=round(p[3]*pixcal,1) #microns
-        img3=cv2.rectangle(img0,(p[0],p[1]),(p[0]+p[2],p[1]+p[3]),color,thickness)
+        img3=cv2.rectangle(img0,(p[0],p[1]),(p[0]+p[2],p[1]+p[3]),color,thickness) #creating the output images
         img3 = cv2.putText(img3, str(height), (p[0]+p[2]+10,p[1]+int(p[3]/2)), cv2.FONT_HERSHEY_SIMPLEX,1, (0,0,0), 2, cv2.LINE_AA)
         img3 = cv2.putText(img3, str(width), (p[0],p[1]-10), cv2.FONT_HERSHEY_SIMPLEX,1, (0,0,0), 2, cv2.LINE_AA)
+        flakergb=[0,0,0]
+        farea=0
         if boundflag==1:
-            for index in indices:
-                #print(index)
-                indx=index[0]+bounds[0]
-                indy=index[1]+bounds[2]
-                img4=cv2.rectangle(img4,(p[0],p[1]),(p[0]+p[2],p[1]+p[3]),color,thickness)
-                img4 = cv2.putText(img4, str(height), (p[0]+p[2]+10,p[1]+int(p[3]/2)), cv2.FONT_HERSHEY_SIMPLEX,1, (0,0,0), 2, cv2.LINE_AA)
-                img4 = cv2.putText(img4, str(width), (p[0],p[1]-10), cv2.FONT_HERSHEY_SIMPLEX,1, (0,0,0), 2, cv2.LINE_AA)
-                img4[indx,indy]=img4[indx,indy]+[25,25,25]
-                xarr.append(indx)
-                yarr.append(indy)
+            flakergb,edgeim,farea=edgefind(imchunk,avg_rgb,pixcals) #calculating border pixels
+            print('Edge found')
+            img4=cv2.rectangle(img4,(p[0],p[1]),(p[0]+p[2],p[1]+p[3]),color,thickness)
+            img4 = cv2.putText(img4, str(height), (p[0]+p[2]+10,p[1]+int(p[3]/2)), cv2.FONT_HERSHEY_SIMPLEX,1, (0,0,0), 2, cv2.LINE_AA)
+            img4 = cv2.putText(img4, str(width), (p[0],p[1]-10), cv2.FONT_HERSHEY_SIMPLEX,1, (0,0,0), 2, cv2.LINE_AA)
+            img4[bounds[0]:bounds[1],bounds[2]:bounds[3]]=img4[bounds[0]:bounds[1],bounds[2]:bounds[3]]+edgeim
         logstr=str(num)+','+str(farea)+','+str(flakergb[0])+','+str(flakergb[1])+','+str(flakergb[2])+','+str(backrgb[0])+','+str(backrgb[1])+','+str(backrgb[2])
         logger.write(logstr+'\n')
-        #poscount=poscount+1
-        #logger.write(logstr+'\n')
-    #logger.close()
-    
     logger.close()
 
     cv2.imwrite(os.path.join(outputdir, os.path.basename(img_filepath)),img3)
@@ -330,7 +322,7 @@ def run_file(img_filepath,outputdir,scanposdict,bgs,dims):
     
     tok = time.time()
     print(f"{img_filepath} - {tok - tik} seconds")
-def edgefind(imchunk,avg_rgb,pixcals):
+def edgefind(imchunk,avg_rgb,pixcals): #this identifies the edges of flakes, resource-intensive but useful for determining if flake ID is working
     pixcalw=pixcals[0]
     pixcalh=pixcals[1]
     edgerad=20
@@ -339,37 +331,27 @@ def edgefind(imchunk,avg_rgb,pixcals):
     dims=np.shape(imchunk)
     flakeid=np.sqrt(np.sum((impix - avg_rgb) ** 2, axis=1))<t_rgb_dist #a mask for pixel color
     maskpic=np.reshape(flakeid,(dims[0],dims[1],1))
-    red1=impix[:,0]*flakeid
-    green1=impix[:,1]*flakeid
-    blue1=impix[:,2]*flakeid
-    reds=red1[red1>0]
-    greens=green1[green1>0]
-    blues=blue1[blue1>0]
-    print(blue1,blues)
-    freds=np.bincount(reds)
-    fgreens=np.bincount(greens)
-    fblues=np.bincount(blues)
-    
+    freds=np.bincount(impix[:,0]*flakeid)
+    fgreens=np.bincount(impix[:,1]*flakeid)
+    fblues=np.bincount(impix[:,2]*flakeid)
     freds[0]=0 #otherwise argmax finds values masked to 0 by flakeid
     fgreens[0]=0
     fblues[0]=0
-    freddest=np.average(reds)#freds.argmax()
-    fgreenest=np.average(greens)
-    fbluest=np.average(blues) #assuming we're good at finding flakes...
+    freddest=freds.argmax() #determines flake RGB as the most common R,G,B value in identified flake region
+    fgreenest=fgreens.argmax()
+    fbluest=fblues.argmax() 
     rgb=[freddest,fgreenest,fbluest]
-
+    h,w,c=imchunk.shape
     flakeid2=np.sqrt(np.sum((impix - rgb) ** 2, axis=1))<5 #a mask for pixel color
     maskpic2=np.reshape(flakeid2,(dims[0],dims[1],1))
     indices = np.argwhere(np.any(maskpic2 > 0, axis=2)) #flake region
     farea=round(len(indices)*pixcalw*pixcalh,1)
-    indices2=np.argwhere(np.any(maskpic2 > -1, axis=2))
-    indices3=[]
-    for index in indices2:
-         dist=np.min(np.sum((indices-index) ** 2, axis=1))
-         if dist>3 and dist<20:
-            indices3.append(index)#borders
-    print('boundary found')    
-    return rgb,indices3,farea
+    grayimg=cv2.cvtColor(imchunk, cv2.COLOR_BGR2GRAY)
+    grayimg=cv2.fastNlMeansDenoising(grayimg,None,2,3,11) 
+    edgeim=np.reshape(cv2.Canny(grayimg,5,15),(h,w,1))
+    edgeim=edgeim.astype(np.int16)*np.array([25,25,25])/255
+    edgeim=edgeim.astype(np.uint8)
+    return rgb,edgeim,farea
 def dimget(inputdir):
         filename=inputdir+"/leicametadata/TileScan_001.xlif"
         try:
@@ -403,7 +385,7 @@ def dimget(inputdir):
             return 1,1
 def posget(inputdir):
     filename=inputdir+"/leicametadata/TileScan_001.xlif"
-    print(filename)
+    #print('Posget',filename)
     posarr=[]
     with open(filename,'r') as file:
         rawdata=file.read()
@@ -516,13 +498,13 @@ def rgb_get(f,scanposdict,bgs,dims):
     while radius>0.1:
         i=i+1
         radius = (imloc[0]-scanposdict[i][0])**2+(imloc[1]-scanposdict[i][2])**2
-    posx=scanposdict[i][1]
-    posy=scanposdict[i][3]
-    pos=np.array([posx,posy])
+    posx2=scanposdict[i][1]
+    posy2=scanposdict[i][3]
+    pos=np.array([posx2,posy2])
     bgsx=np.array(bgs[:,0])
     bgsy=np.array(bgs[:,1])
-    radx=bgsx-posx
-    rady=bgsy-posy
+    radx=bgsx-posx2
+    rady=bgsy-posy2
     radii=radx**2+rady**2
     minrad=min(radii)
     radii=list(radii)
@@ -530,7 +512,7 @@ def rgb_get(f,scanposdict,bgs,dims):
     #print(bgs[mindex],pos)
     bg_rgb=[bgs[mindex][2],bgs[mindex][3],bgs[mindex][4]]
     #print(minrad,mindex,bg_rgb)
-    return bg_rgb
+    return posx2,posy2,bg_rgb
 def main(args):
     inputfile=args.q
     file1=open(str(inputfile))
@@ -547,8 +529,12 @@ def main(args):
     for pair in cleaninputs:
         input_dir=pair[0]
         outputloc=pair[1]
-        basedir=inputdir.split("Scan")[0]
+        print("Searching the scan located at")
+        print(input_dir)
+        basedir=input_dir.split("Scan")[0]
         bg_dir=basedir+"\Background\TileScan_001"
+        print("Using the background scan")
+        print(bg_dir)
         bgwrite=open(basedir+"BG_RGB.txt","w+")
         bgwrite.write("X,Y,R,G,B\n")
         bgwrite.close()
@@ -573,6 +559,7 @@ def main(args):
         logger.close()
         tik = time.time()
         #print(bgfiles)
+        print("Calculating background RGB as a function of position")
         with Pool(n_proc) as pool:
             bgs=pool.map(get_bg_rgb_wrapped, bgfiles)
         bgs=np.array(bgs)
@@ -583,6 +570,7 @@ def main(args):
         with Pool(n_proc) as pool:
             pool.map(run_file_wrapped, files)
         tok = time.time()
+        print('Pool done')
         filecounter = glob.glob(os.path.join(outputloc, "*"))
         filecounter=[f for f in filecounter if os.path.splitext(f)[1] in [".jpg", ".png", ".jpeg"]]
         filecounter2=[f for f in filecounter if ("Stage" in f or 'stage' in f)]
@@ -596,8 +584,7 @@ def main(args):
         f.write('flake_colors_rgb='+str(flake_colors_rgb)+'\n')
         f.write('t_rgb_dist='+str(t_rgb_dist)+'\n')
         #f.write('t_hue_dist='+str(t_hue_dist)+'\n')
-        f.write('t_red_dist='+str(t_red_dist)+'\n')
-        f.write('t_red_cutoff='+str(t_red_cutoff)+'\n')
+        #f.write('t_red_cutoff='+str(t_red_cutoff)+'\n')
         f.write('t_color_match_count='+str(t_color_match_count)+'\n')
         f.write('t_min_cluster_pixel_count='+str(t_min_cluster_pixel_count)+'\n')
         f.write('t_max_cluster_pixel_count='+str(t_max_cluster_pixel_count)+'\n')

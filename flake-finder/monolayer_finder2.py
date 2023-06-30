@@ -68,8 +68,122 @@ t_min_cluster_pixel_count = 30*(k/4)**2  # flake too small
 t_max_cluster_pixel_count = 20000*(k/4)**2  # flake too large
  # scale factor for DB scan. recommended values are 3 or 4. Trade-off in time vs accuracy. Impact epsilon.
 scale=1 #the resolution images are saved at, relative to the original file. Does not affect DB scan
-
+uderivlim=np.array([5,7,30]) #bgr
+lderivlim=np.array([0,0,0])
+graylim=5
+offset=3
 # This would be a decorator but apparently multiprocessing lib doesn't know how to serialize it.
+def derivget(img,direction,offset): #takes imgand subtracts itself by offset in direction
+    absoffset=abs(offset)
+    noiseh=2
+    
+    if len(np.shape(img))==2:
+        c=1
+        h,w=np.shape(img)
+        denoisedimg=cv2.fastNlMeansDenoising(img,None,noiseh,3,11) 
+    else:
+        h,w,c=img.shape
+        denoisedimg=cv2.fastNlMeansDenoisingColored(img,None,noiseh,10,3,11) 
+    
+    #cv2.imshow('noise',denoisedimg)
+    #cv2.waitKey(0)
+    img=denoisedimg.astype(np.int32)
+    if direction=='x': #left to right deriv
+        d1=img[0:h,0:w-absoffset]
+        d2=img[0:h,absoffset:w]
+    elif direction=='y':
+        d1=img[0:h-absoffset,0:w]
+        d2=img[absoffset:h,0:w]
+    delt=abs(d2-d1)/absoffset
+    #print(delt)
+    delt=delt.astype(np.uint8)
+    return delt
+
+def derivget2(img,direction,offset):
+    absoffset=abs(offset)
+    noiseh=2
+    
+    if len(np.shape(img))==2:
+        c=1
+        
+        h,w=np.shape(img)
+        
+        denoisedimg=cv2.fastNlMeansDenoising(img,None,noiseh,3,11) 
+        
+        black=np.zeros((h+2*absoffset,w+2*absoffset))
+        
+    else:
+        h,w,c=img.shape
+        denoisedimg=cv2.fastNlMeansDenoisingColored(img,None,noiseh,10,3,11) 
+        black=np.zeros((h+2*absoffset,w+2*absoffset,3))
+    #cv2.imshow('noise',denoisedimg)
+    #cv2.waitKey(0)
+    
+    img=denoisedimg.astype(np.float32)
+    k=-offset
+    while k<offset+1:
+        print(k)
+        if direction=='x':
+            black[offset+k:h+offset+k,0:w]=black[offset+k:h+offset+k,0:w]+img/(2*offset+1)
+            
+        if direction=='y':
+            black[0:h,offset+k:w+offset+k]=black[offset+k:h+offset+k,0:w]+img/(2*offset+1)
+        print(black[0])
+        k=k+1
+    black=black.astype(np.uint8)
+    if direction=='x':
+        output=derivget(black,'y',offset)
+    if direction=='y':
+        output=derivget(black,'x',offset)
+    output=output.astype(np.int16)
+    output=output*250/np.max(output)
+    output=output.astype(np.uint8)
+    #cv2.imshow('black',black2)
+    #cv2.waitKey(0)
+    #cv2.imshow('out',output)
+    #cv2.waitKey(0)
+    return output
+def derivcomb(img,offset):
+    absoffset=abs(offset)
+    ximg=derivget(img,'x',absoffset)
+    yimg=derivget(img,'y',absoffset)
+    if len(np.shape(img))==2:
+        c=1
+        xh,xw=np.shape(ximg)
+        yh,yw=np.shape(yimg)
+    else:
+        xh,xw,xc=ximg.shape
+        yh,yw,yc=yimg.shape
+    print(xh,xw,yh,yw)
+    step=int(absoffset)
+    dxtrim=ximg[0:xh-step,0:xw]
+    dytrim=yimg[0:yh,0:yw-step]
+    # cv2.imshow('dx',dxtrim)
+    # cv2.waitKey(0)
+    # cv2.imshow('dy',dytrim)
+    # cv2.waitKey(0)
+    print(dxtrim.shape,dytrim.shape)
+    return dytrim+dxtrim
+def derivfilt(img,offset):
+    lowlim=lderivlim
+    highlim=uderivlim
+    if len(np.shape(img))==2:
+        c=1
+        h,w=np.shape(img)
+        derivimg=derivcomb(img,offset).astype(np.int16)
+        testgray=np.sign(derivimg)*np.sign(graylim-derivimg)
+        graypixoutscale=derivimg*np.sign(testgray+abs(testgray))*250/np.max(derivimg)
+        print(np.max(graypixoutscale))
+        pixoutgray=graypixoutscale.astype(np.uint8)
+        return pixoutgray
+    else:
+        h,w,c=img.shape
+        derivimg=derivcomb(img,offset)
+        test=np.sign(derivimg-lowlim)*np.sign(highlim-derivimg)
+        pixout=derivimg*np.sign(test+abs(test))
+        pixoutscale=pixout*250/uderivlim
+        pixout2=pixoutscale.astype(np.uint8)
+        return pixout2
 def run_file_wrapped(filepath):
     tik = time.time()
     filepath1=filepath[0]
@@ -123,6 +237,14 @@ def run_file(img_filepath,outputdir,scanposdict,dims):
 
     #img_mask = np.logical_and(hue_pixel_dists < t_hue_dist, rgb_pixel_dists < t_rgb_dist)
     img_mask= np.logical_and(rgb_pixel_dists < t_rgb_dist,reddest-img_pixels[:,0]>5) #masking the image to only the pixels close enough to predicted flake color
+    img123=cv2.resize(255*img_mask.astype(np.uint8),dsize=(256 * k, 171 * k))
+    imfilt=img0*img_mask.reshape((h,w,1))
+    imfiltgray=cv2.cvtColor(imfilt, cv2.COLOR_RGB2GRAY)
+    imderiv=derivfilt(imfiltgray,3)
+    #cv2.imshow('123',cv2.resize(imfilt,dsize=(256 * k, 171 * k)))
+    #cv2.waitKey(0)
+    #cv2.imshow('123',cv2.resize(imderiv,dsize=(256 * k, 171 * k)))
+    #cv2.waitKey(0)
     # Show how many are true, how many are false.
     t_count = np.sum(img_mask)
     # print(t_count)
@@ -293,6 +415,7 @@ def run_file(img_filepath,outputdir,scanposdict,dims):
             img4=cv2.rectangle(img4,(p[0],p[1]),(p[0]+p[2],p[1]+p[3]),color,thickness)
             img4 = cv2.putText(img4, str(height), (p[0]+p[2]+10,p[1]+int(p[3]/2)), cv2.FONT_HERSHEY_SIMPLEX,1, (0,0,0), 2, cv2.LINE_AA)
             img4 = cv2.putText(img4, str(width), (p[0],p[1]-10), cv2.FONT_HERSHEY_SIMPLEX,1, (0,0,0), 2, cv2.LINE_AA)
+            print(edgeim.shape)
             img4[bounds[0]:bounds[1],bounds[2]:bounds[3]]=img4[bounds[0]:bounds[1],bounds[2]:bounds[3]]+edgeim
         logstr=str(num)+','+str(farea)+','+str(flakergb[0])+','+str(flakergb[1])+','+str(flakergb[2])+','+str(backrgb[0])+','+str(backrgb[1])+','+str(backrgb[2])
         logger.write(logstr+'\n')

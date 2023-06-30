@@ -1,1 +1,1 @@
-InputDir: D:\04_03_23_EC_1\Scan 002\TileScan_001, OutputDir: D:\04_03_23_EC_1\MLScanned2\
+InputDir: D:\04_03_23_EC_1\Scan 002\TileScan_001\, OutputDir: D:\04_03_23_EC_1\MLScanned\
