@@ -1,1 +1,2 @@
-InputDir: D:\05_30_23_EC_1\Scan 002\TileScan_001, OutputDir: D:\05_30_23_EC_1\MLScanned4_100um\
+InputDir: D:\08_10_23_EC_1\Scan 004\TileScan_001\, OutputDir: D:\08_10_23_EC_1\SortScanned5x\
+InputDir: D:\08_10_23_EC_1\Scan 003\TileScan_001\, OutputDir: D:\08_10_23_EC_1\SortScanned10x\

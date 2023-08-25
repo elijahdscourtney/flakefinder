@@ -10,20 +10,24 @@ from multiprocessing import Pool
 import cv2
 import numpy as np
 
-from config import threadsave, boundflag, t_color_match_count, UM_TO_PX, FLAKE_MIN_AREA_UM2, FLAKE_MAX_AREA_UM2, k, FONT
+from config import threadsave, boundflag, t_color_match_counts, FLAKE_MIN_AREA_UM2, FLAKE_MAX_AREA_UM2, k, FONT, COLOR_PASS_CUTOFF, UM_TO_PXs
 from util.queue import load_queue
-from util.leica import dim_get, pos_get, get_stage
+from util.leica import dim_get, pos_get, get_stage, mag_get
 from util.plot import make_plot, location
 from util.processing import bg_to_flake_color, get_bg_pixels, get_avg_rgb, mask_flake_color, mask_flake_color2, apply_morph_open, \
                             apply_morph_close, get_lines, is_edge_image, mask_bg
-from util.box import merge_boxes, make_boxes, draw_box, draw_line_angles, get_flake_color
+from util.box import merge_boxes, make_boxes, draw_box, draw_line_angles, get_flake_color, label_angles, check_color_ratios, get_color_ratio
 from util.logger import logger
 
-
-def run_file(img_filepath, output_dir, scan_pos_dict, dims):
+def run_file(img_filepath, output_dir, scan_pos_dict, dims, n_layer, magx):
     tik = time.time()
-
     try:
+        if magx=='5x':
+            UM_TO_PX=UM_TO_PXs[1]
+            t_color_match_count=t_color_match_counts[1]
+        elif magx=='10x':
+            UM_TO_PX=UM_TO_PXs[0]
+            t_color_match_count=t_color_match_counts[0]
         stage = get_stage(img_filepath)
 
         img = cv2.imread(img_filepath)
@@ -55,13 +59,13 @@ def run_file(img_filepath, output_dir, scan_pos_dict, dims):
         # Get monolayer color from background color
         back_rgb = get_avg_rgb(pixout)
         back_hsv = cv2.cvtColor(np.uint8([[back_rgb]]), cv2.COLOR_RGB2HSV)[0][0]
-        flake_avg_rgb = bg_to_flake_color(back_rgb)
+        flake_avg_rgb = bg_to_flake_color(back_rgb, n_layer)
         flake_avg_hsv = cv2.cvtColor(np.uint8([[flake_avg_rgb]]), cv2.COLOR_RGB2HSV)[0][0]  # TODO: hacky?
         
         # Mask image using thresholds and apply morph operations to reduce false positives
         start = time.time()
         #masked = mask_flake_color(img, flake_avg_hsv)
-        maskbg=mask_bg(img,back_rgb,back_hsv)
+        maskbg=mask_bg(img,back_rgb,back_hsv,n_layer)
         h,w=np.shape(maskbg)
         #cv2.imshow('mbg',cv2.resize(maskbg.astype(np.uint8), (int(w/4),int(h/4))))
         #cv2.waitKey(0)
@@ -70,11 +74,14 @@ def run_file(img_filepath, output_dir, scan_pos_dict, dims):
         masked=masked*maskbg.astype(np.float32)/255
         #cv2.imshow('m2',cv2.resize(masked.astype(np.uint8), (int(w/4),int(h/4))))
         #cv2.waitKey(0)
+        #print(magx)
         if np.sum(masked/255)<t_color_match_count*len(masked.reshape(-1,1)):
             return logger.info(f"{stage} - rejected for unsuitable color in {delay}s")
         masked=masked.astype(np.uint8)
-        dst = apply_morph_close(masked)
-        dst = apply_morph_open(dst)
+        dst = apply_morph_close(masked, magx)
+        dst = apply_morph_open(dst,magx)
+        #cv2.imshow('m2',cv2.resize(dst.astype(np.uint8), (int(w/4),int(h/4))))
+        #cv2.waitKey(0)
         end = time.time()
         delay=round(end-start,3)
         logger.debug(f"Stage{stage} thresholded and transformed in {delay}s")
@@ -91,10 +98,12 @@ def run_file(img_filepath, output_dir, scan_pos_dict, dims):
 
         # Make boxes and merge boxes that overlap
         start = time.time()
-        boxes = make_boxes(contours, hierarchy, img_h, img_w)
-       
-        boxes = merge_boxes(boxes)
-        boxes = merge_boxes(boxes)
+        [boxes,flake_rs] = make_boxes(contours, hierarchy, img_h, img_w, magx)
+        if not boxes:
+            delay=round(time.time() - tik,3)
+            return logger.info(f"{stage} - rejected for no boxes(1) in {delay}s")
+        [boxes,flake_rs] = merge_boxes(boxes,flake_rs)
+        [boxes,flake_rs] = merge_boxes(boxes,flake_rs)
         end = time.time()
         
         delay=round(end-start,3)
@@ -110,7 +119,7 @@ def run_file(img_filepath, output_dir, scan_pos_dict, dims):
         try:
             posy, posx = scan_pos_dict[int(yd), int(xd)]
             pos_str = "X:" + str(round(1000 * posx, 2)) + ", Y:" + str(round(1000 * posy, 2))
-        except IndexError:
+        except:
             logger.warn(f'Stage{stage} pos conversion failed!')
             pos_str = ""
 
@@ -118,39 +127,95 @@ def run_file(img_filepath, output_dir, scan_pos_dict, dims):
         start = time.time()
 
         img0 = cv2.putText(img, pos_str, (100, 100), FONT, 3, (0, 0, 0), 2, cv2.LINE_AA)
-        img4 = img0.copy()
-
+        img4=img0.copy()
+        imgbul = img0.copy()
+        imgmon = img0.copy()
+        imgbi = img0.copy()
+        imgtri = img0.copy()
+        imgbul4 = img0.copy()
+        imgmon4 = img0.copy()
+        imgbi4 = img0.copy()
+        imgtri4 = img0.copy()
+        taglist=['Total',"Bulk","Monolayer","Bilayer","Trilayer"]
         max_area = 0 
-
+        i=0
+        tagarr=['Total']
+        btarr=[]
         with open(output_dir + "Color Log.csv", "a+") as flake_log, \
              open(output_dir + "Edge Log.csv", "a+") as edge_log:
-            for box in boxes:
-                img0 = draw_box(img0, box)
+            
+            while i<len(boxes):
+                box=boxes[i]
+                flake_r=flake_rs[i]
+                img0 = draw_box(img0, box, magx)
                 max_area = max(int(box.area), max_area)
-
-                if boundflag:
-                    logger.debug('Drawing contour bounds...')
-                    img4 = draw_box(img4, box)
-                    img4 = cv2.drawContours(img4, box.contours, -1, (255, 255, 255), 1)
-
-                    lines = get_lines(img4, box.contours)
-                    angles = draw_line_angles(img4, box, lines)
-
-                    if lines is not None:
-                        edge_log.write(f'{str(stage)},{" ".join(map(str, angles)) if len(angles) > 0 else "-"}')
+                #print(flake_avg_rgb)
                 real_flake_rgb=get_flake_color(img,flake_avg_rgb,box)
-                flake_log.write(f'{str(stage)},{str(int(box.area/UM_TO_PX**2))},{str(real_flake_rgb[0])},{str(real_flake_rgb[1])},{str(real_flake_rgb[2])},{str(back_rgb[0])},{str(back_rgb[1])},{str(back_rgb[2])}\n')
-
+                if 1:
+                    tag=check_color_ratios(img4,box,back_rgb,real_flake_rgb, magx)
+                    print(tag)
+                    if tag not in tagarr:
+                        tagarr.append(tag)
+                    if tag=='Bulk':
+                        imgbul,imgbul4=markimg(imgbul,imgbul4,box,magx)
+                    elif tag=="Monolayer":
+                        imgmon,imgmon4=markimg(imgmon,imgmon4,box,magx)
+                    elif tag=="Bilayer":
+                        imgbi,imgbi4=markimg(imgbi,imgbi4,box,magx)
+                    elif tag=="Trilayer":
+                        imgtri,imgtri4=markimg(imgtri,imgtri4,box,magx)
+                    if boundflag:
+                        logger.debug('Drawing contour bounds...')
+                        
+                        img4 = draw_box(img4, box, magx)
+                        img4 = cv2.drawContours(img4, box.contours, -1, (255, 255, 255), 1)
+                        lines = get_lines(img4, magx, box.contours)
+                        try:
+                            linelen=len(lines)
+                        except:
+                            linelen=0
+                        if linelen>0:
+                            labeledangles = draw_line_angles(img4, box, lines)
+                            degangles=['-']
+                            if len(labeledangles)>0:
+                                img4=label_angles(img4, labeledangles, box)
+                                degangles=[round(np.rad2deg(np.min([t[0],abs(t[0]-2*np.pi)])),1) for t in labeledangles]
+                            edge_log.write(f'{str(stage)},{str(int(box.area/UM_TO_PX**2))},{str(int(len(lines)))},{" ".join(map(str, degangles))}')
+                            edge_log.write('\n')
+                    try:
+                        xoff=(box.x+box.width/2)/UM_TO_PX
+                        yoff=(box.y+box.height/2)/UM_TO_PX
+                        posx2=round(posx*1000+xoff/1000,2)
+                        posy2=round(posy*1000+yoff/1000,2)
+                        flake_log.write(f'{str(stage)},{str(int(box.area/UM_TO_PX**2))},{str(real_flake_rgb[0])},{str(real_flake_rgb[1])},{str(real_flake_rgb[2])},{str(back_rgb[0])},{str(back_rgb[1])},{str(back_rgb[2])},{str(int(flake_r))},{str(posx2)},{str(posy2)}\n')
+                    except:
+                        flake_log.write(f'{str(stage)},{str(int(box.area/UM_TO_PX**2))},{str(real_flake_rgb[0])},{str(real_flake_rgb[1])},{str(real_flake_rgb[2])},{str(back_rgb[0])},{str(back_rgb[1])},{str(back_rgb[2])},{str(int(flake_r))},-,-\n')
+                i=i+1
         end = time.time()
         delay=round(end-start,3)
         logger.debug(f"Stage{stage} labelled images in {delay}s")
-
+        
         start = time.time()
-        cv2.imwrite(os.path.join(output_dir, os.path.basename(img_filepath)), cv2.cvtColor(img0, cv2.COLOR_RGB2BGR))
-
-        if boundflag:
-            max_area=int(max_area/(UM_TO_PX)**2)#convert from pixels to um2
-            cv2.imwrite(os.path.join(output_dir + "\\AreaSort\\", str(max_area) + '_' + os.path.basename(img_filepath)), cv2.cvtColor(img4, cv2.COLOR_RGB2BGR))
+        max_area=int(max_area/(UM_TO_PX)**2)#convert from pixels to um2
+        for tag in tagarr:
+            if tag=='Total':
+                imgout1=img0
+                imgout2=img4
+            elif tag=='Monolayer':
+                imgout1=imgmon
+                imgout2=imgmon4
+            elif tag=='Bilayer':
+                imgout1=imgbi
+                imgout2=imgbi4
+            elif tag=='Trilayer':
+                imgout1=imgtri
+                imgout2=imgtri4
+            elif tag=='Bulk':
+                imgout1=imgbul
+                imgout2=imgbul4
+            cv2.imwrite(os.path.join(output_dir, tag, os.path.basename(img_filepath)), cv2.cvtColor(imgout1, cv2.COLOR_RGB2BGR))
+            if boundflag:
+                cv2.imwrite(os.path.join(output_dir, tag, "AreaSort", str(max_area) + '_' + os.path.basename(img_filepath)), cv2.cvtColor(imgout2, cv2.COLOR_RGB2BGR))
 
         end = time.time()
         delay=round(end-start,3)
@@ -162,32 +227,52 @@ def run_file(img_filepath, output_dir, scan_pos_dict, dims):
     tok = time.time()
     logger.info(f"{img_filepath} - {tok - tik}s")
 
-
 def main(args):
     print(args)
     config = load_queue(args.q)
-
+    n_layer=int(args.n)
     for input_dir, output_dir in config:
-        os.makedirs(output_dir, exist_ok=True)
-        os.makedirs(output_dir + "\\AreaSort\\", exist_ok=True)
+        magx=mag_get(input_dir)
+        print(magx)
+        if magx=='5x':
+            UM_TO_PX=UM_TO_PXs[1]
+        elif magx=='10x':
+            UM_TO_PX=UM_TO_PXs[0]
+        taglist=['Total',"Bulk","Monolayer","Bilayer","Trilayer"]
+        for tag in taglist:
+            os.makedirs(os.path.join(output_dir, tag), exist_ok=True)
+            os.makedirs(os.path.join(output_dir, tag, "AreaSort"), exist_ok=True)
 
-        input_files = [f for f in glob.glob(os.path.join(input_dir, "*")) if "Stage" in f]
+        input_files = [f for f in glob.glob(os.path.join(input_dir, "*")) if ("Stage" in f or "stage" in f)]
+        if len(input_files)==0:
+            input_files=[f for f in glob.glob(os.path.join(input_dir, "*"))]
         input_files.sort(key=len)
-
         # Write log file headers
         with open(output_dir + "Color Log.csv", "w+") as flake_log, \
              open(output_dir + "Edge Log.csv", "w+") as edge_log:
-            flake_log.write('N,A,Rf,Gf,Bf,Rw,Gw,Bw\n')
-            edge_log.write('N,T\n')
+            flake_log.write('N,A(um2),Rf,Gf,Bf,Rw,Gw,Bw,P*P/A,X(mm),Y(mm)\n')
+            edge_log.write('N,A(um2),Edgecount,theta(deg)\n')
 
         tik = time.time()
-        scanposdict = pos_get(input_dir)
-        dims = dim_get(input_dir)
+        try:
+            scanposdict = pos_get(input_dir)
+        except:
+            scanposdict=[]
+        try:
+            dims = dim_get(input_dir)
+        except:
+            dims=[1,1]
 
         n_proc = os.cpu_count() - threadsave
+        
         files = [
-            [f, output_dir, scanposdict, dims] for f in input_files
-            if os.path.splitext(f)[1] in [".jpg", ".png", ".jpeg"]
+            [f, output_dir, scanposdict, dims,n_layer, magx] for f in input_files
+            if (os.path.splitext(f)[1] in [".jpg", ".png", ".jpeg"])
+        ]
+        if len(files)==0:
+            files = [
+            [f, output_dir, scanposdict, dims,n_layer, magx] for f in input_files
+            if (os.path.splitext(f)[1] in [".jpg", ".png", ".jpeg"] and os.path.splitext(f)[0].split('\\')[-1].isnumeric())
         ]
         print('Running '+input_dir)
         with Pool(n_proc) as pool:
@@ -196,9 +281,14 @@ def main(args):
         tok = time.time()
 
         output_files = [
-            f for f in glob.glob(os.path.join(output_dir, "*"))
-            if os.path.splitext(f)[1] in [".jpg", ".png", ".jpeg"] and "Stage" in f
+            f for f in glob.glob(os.path.join(output_dir,"Total", "*"))
+            if os.path.splitext(f)[1] in [".jpg", ".png", ".jpeg"] and ("Stage" in f or "stage" in f)
         ]
+        if len(output_files)==0:
+            output_files = [
+                f for f in glob.glob(os.path.join(output_dir, "*"))
+                if (os.path.splitext(f)[1] in [".jpg", ".png", ".jpeg"] and os.path.splitext(f)[0].split('\\')[-1].isnumeric())
+            ]
         filecount = len(output_files)
 
         with open(output_dir + "Summary.txt", "a+") as f:
@@ -210,7 +300,7 @@ def main(args):
             f.write('k=' + str(k) + "\n\n")
 
         area_log = open(output_dir + "By Area.csv", "w+")
-        area_log.write("Num,A\n")
+        area_log.write("Num,A,X,Y\n")
         area_log.close()
         area_log = open(output_dir + "By Area.csv", "a+")
 
@@ -223,24 +313,40 @@ def main(args):
 
         flake_data = np.loadtxt(output_dir + "Color Log.csv", skiprows=1, delimiter=',', unpack=True)
         if flake_data.size > 0:
-            N, A, Rf, Gf, Bf, Rw, Gw, Bw = flake_data
+            N, A, Rf, Gf, Bf, Rw, Gw, Bw , P, X, Y= flake_data
 
             pairs = []
             i = 0
-            while i < len(A):
-                pair = np.array([N[i], A[i]])
+            try:
+                while i < len(A):
+                    pair = np.array([N[i], A[i], X[i], Y[i]])
+                    pairs.append(pair)
+                    i = i + 1
+            except:
+                pair = np.array([N, A, X, Y])
                 pairs.append(pair)
-                i = i + 1
 
             pairsort = sorted(pairs, key=lambda x: x[1], reverse=True)
             for pair in pairsort:
-                writestr = str(int(pair[0])) + ', ' + str(pair[1]) + '\n'
+                writestr = str(int(pair[0])) + ', ' + str(pair[1]) + ', ' + str(pair[2]) + ', ' + str(pair[3])+'\n'
                 area_log.write(writestr)
             area_log.close()
 
         logger.info(f"Total for {len(files)} files: {tok - tik} = avg of {(tok - tik) / len(files)} per file")
-
-
+def markimg(img0,img4,box, magx):
+    img0 = draw_box(img0, box, magx)
+    img4= draw_box(img4, box, magx)
+    img4 = cv2.drawContours(img4, box.contours, -1, (255, 255, 255), 1)
+    lines = get_lines(img4, magx, box.contours)
+    try:
+        linelen=len(lines)
+    except:
+        linelen=0
+    if linelen>0:
+        labeledangles = draw_line_angles(img4, box, lines)
+        if len(labeledangles)>0:
+            img4=label_angles(img4, labeledangles, box)
+    return img0,img4
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Find graphene flakes on SiO2. Currently configured only for exfoliator dataset"
@@ -250,6 +356,12 @@ if __name__ == "__main__":
         type=str,
         default="Queue.txt",
         help="Directory containing images to process. Optional unless running in headless mode"
+    )
+    parser.add_argument(
+        "--n",
+        type=str,
+        default=1,
+        help="Target Number of Layers"
     )
     args = parser.parse_args()
     main(args)

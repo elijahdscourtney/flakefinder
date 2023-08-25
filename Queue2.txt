@@ -1,0 +1,1 @@
+InputDir: D:\05_30_23_EC_1\Scan 002\TileScan_002\, OutputDir: D:\05_30_23_EC_1\SortScanned\

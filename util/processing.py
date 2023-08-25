@@ -1,25 +1,32 @@
 import cv2
 import numpy as np
 
-from config import OPEN_MORPH_SIZE, CLOSE_MORPH_SIZE, OPEN_MORPH_SHAPE, CLOSE_MORPH_SHAPE, UM_TO_PX, \
-                   FLAKE_MIN_EDGE_LENGTH_UM, FLAKE_ANGLE_TOLERANCE_RADS, k
+from config import OPEN_MORPH_SIZES, CLOSE_MORPH_SIZES, OPEN_MORPH_SHAPE, CLOSE_MORPH_SHAPE, UM_TO_PXs, \
+                   FLAKE_MIN_EDGE_LENGTH_UM, FLAKE_ANGLE_TOLERANCE_RADS, k, maxlinegaps
 
 RGB = tuple[int, int, int]
 FlakeRGB = np.ndarray[int]
 
 
-def bg_to_flake_color(rgb: RGB) -> FlakeRGB:
+def bg_to_flake_color(rgb: RGB, n_layer: int) -> FlakeRGB:
     """
     Returns the flake color based on an input background color. Values determined empirically.
     :param rgb: The RGB array representing the color of the background.
     :return: The RGB array representing the color of the flake.
     """
     red, green, blue = rgb
-
-    flake_red = 0.8289 * red +1.888
-    flake_green = 0.9456 * green + 0.402
-    flake_blue = 1.061 * blue-4.336
-
+    if n_layer==1:
+        flake_red = 0.8289 * red +1.888
+        flake_green = 0.9456 * green + 0.402
+        flake_blue = 1.061 * blue-4.336
+    elif n_layer==2:
+        flake_red = 0.8861*red-19.22
+        flake_green = 0.9472*green-5.691
+        flake_blue = 1.028*blue+3.368
+    elif n_layer==3:
+        flake_red=1.0119*red-46.61
+        flake_green=0.8887*green-4.851
+        flake_blue=1.045*blue+4.769
     return np.array([flake_red, flake_green, flake_blue])
 
 
@@ -50,18 +57,33 @@ def get_avg_rgb(img: np.ndarray, mask: np.ndarray[bool] = 1) -> RGB:
     
     return int(red_freq.argmax()), int(green_freq.argmax()), int(blue_freq.argmax())
 
-def mask_bg(img: np.ndarray, back_rgb: tuple[int, int, int], back_hsv: tuple[int, int, int]) -> np.ndarray:
-    lower = tuple(map(int,  np.array(back_rgb) -(44, 15, 5)))
-    higher = tuple(map(int, np.array(back_rgb) -(8, -24, -8)))
-    #print(lower,higher)
-    maskrgb=cv2.inRange(img, lower, higher)
+
+def mask_bg(img: np.ndarray, back_rgb: tuple[int, int, int], back_hsv: tuple[int, int, int], n_layer: int) -> np.ndarray:
+    if n_layer==1:
+        lowerrgb = (44, 15, 5)
+        higherrgb = (8, -24, -8)
+        lowerhsv = (75,30,19)
+        higherhsv = (-120,-60,-7)
+        #print(lower,higher)
+    if n_layer==2:
+        lowerrgb = (38, 17, -6)
+        higherrgb = (26, 7, -11)
+        lowerhsv = (66,-42,6)
+        higherhsv = (-86,-86,-10)
+    if n_layer==3:
+        lowerrgb = (48, 24, -6)
+        higherrgb = (42, 14, -15)
+        lowerhsv = (56,-73,4)
+        higherhsv = (-80,-112,-12)
+    maskrgb=cv2.inRange(img, tuple(map(int,  np.array(back_rgb) -lowerrgb)), tuple(map(int, np.array(back_rgb) -higherrgb)))
     img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-    
-    lower = tuple(map(int,  np.array(back_hsv) - (75,30,19)))
-    higher = tuple(map(int, np.array(back_hsv) - (-120,-60,-7)))
-    maskhsv=cv2.inRange(img_hsv, lower, higher)
+    maskhsv=cv2.inRange(img_hsv, tuple(map(int,  np.array(back_hsv) - lowerhsv)), tuple(map(int, np.array(back_hsv) - higherhsv)))
     maskbg=maskrgb*maskhsv.astype(np.float32)/255
     return maskbg.astype(np.uint8)
+
+
+            
+    
 def mask_flake_color(img: np.ndarray, flake_avg_hsv: np.ndarray) -> np.ndarray:
     """
     Mask an image to black and white pixels based on whether it is within threshold of the given flake color, used by
@@ -130,7 +152,8 @@ def mask_outer(img_hsv: np.ndarray, back_hsv: tuple[int, int, int]) -> np.ndarra
     )
 
 
-def apply_morph_open(masked: np.ndarray, size: int = OPEN_MORPH_SIZE, shape=OPEN_MORPH_SHAPE) -> np.ndarray:
+def apply_morph_open(masked: np.ndarray, magx: str, sizes=OPEN_MORPH_SIZES, shape=OPEN_MORPH_SHAPE) -> np.ndarray:
+    
     """
     Applies the "opening" morphological operation to a masked image to clear away small false-positive "islands".
     https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html
@@ -140,11 +163,15 @@ def apply_morph_open(masked: np.ndarray, size: int = OPEN_MORPH_SIZE, shape=OPEN
     :param shape: The structuring element shape of the transform.
     :return: The black and white image, with the morph applied.
     """
+    if magx=='5x':
+        size=sizes[1]
+    elif magx=='10x':
+        size=sizes[0]
     element = cv2.getStructuringElement(shape, (2 * size + 1, 2 * size + 1))
     return cv2.morphologyEx(masked, cv2.MORPH_OPEN, element)
 
 
-def apply_morph_close(masked: np.ndarray, size: int = CLOSE_MORPH_SIZE, shape=CLOSE_MORPH_SHAPE) -> np.ndarray:
+def apply_morph_close(masked: np.ndarray, magx: str, sizes=CLOSE_MORPH_SIZES, shape=CLOSE_MORPH_SHAPE) -> np.ndarray:
     """
     Applies the "closing" morphological operation to a masked image to fill small "holes" in detected flakes.
     https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html
@@ -154,6 +181,10 @@ def apply_morph_close(masked: np.ndarray, size: int = CLOSE_MORPH_SIZE, shape=CL
     :param shape: The structuring element shape of the transform.
     :return: The black and white image, with the morph applied.
     """
+    if magx=='5x':
+        size=sizes[1]
+    elif magx=='10x':
+        size=sizes[0]
     element = cv2.getStructuringElement(shape, (2 * size + 1, 2 * size + 1))
     return cv2.morphologyEx(masked, cv2.MORPH_CLOSE, element)
 
@@ -174,16 +205,45 @@ def in_bounds(x1: int, y1: int, x2: int, y2: int, w: int, h: int) -> bool:
     return x2 > delt * w and y2 > delt * h and x1 < (1 - delt) * w and y1 < (1 - delt) * h
 
 
-def get_lines(img: np.ndarray, contour):# -> np.ndarray[tuple[tuple[float, float, float, float]]] | None:
+def get_lines(img: np.ndarray, magx, contour):# -> np.ndarray[tuple[tuple[float, float, float, float]]] | None:
     mask = np.zeros(img.shape, np.uint8)
     mask = cv2.drawContours(mask, contour, -1, (255, 255, 255), 1)
-
+    if magx=='5x':
+        UM_TO_PX=UM_TO_PXs[1]
+        maxlinegap=maxlinegaps[1]
+    elif magx=='10x':
+        UM_TO_PX=UM_TO_PXs[0]
+        maxlinegap=maxlinegaps[0]
     # TODO: make the mask b&w to begin with
     # https://docs.opencv.org/3.4/d9/db0/tutorial_hough_lines.html
-    return cv2.HoughLinesP(cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY), 1, np.pi / 180, 50, None, FLAKE_MIN_EDGE_LENGTH_UM * UM_TO_PX, 5)
+    lines=cv2.HoughLinesP(image=cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY), rho=1, theta=np.pi / 180, threshold=int(FLAKE_MIN_EDGE_LENGTH_UM * UM_TO_PX/4), minLineLength = FLAKE_MIN_EDGE_LENGTH_UM * UM_TO_PX, maxLineGap=maxlinegap)
+    try:
+        x=len(lines)
+        #print('lines',x)
+    except:
+        lines=[]
+    return lines
 
-
-def get_angles(lines: np.ndarray[tuple[tuple[float, float, float, float]]]) -> list[float]:
+def anglecheck(t,tol): #checks if angle is close to 30* multiples
+    deg=np.pi/6
+    degrange=np.array([1,2,3,4,5,7,8,9,10,11]) #ignores 0,180,360
+    degrange=deg*degrange
+    intervals=[]
+    k=0
+    output=0
+    while k<len(degrange):
+        angle=degrange[k]
+        if t>angle-tol and t<angle+tol:
+            output=1
+            k=k+len(degrange)
+        k=k+1
+    return output
+        
+            
+        
+    
+    
+def get_angles(linelabels: list[np.ndarray[tuple[tuple[float, float, float, float]]],str]) -> list[[float,str]]:
     """
     Gets all angles within a given range of a multiple of 30 degrees (excluding 180 and 360) given a list of lines.
     :param lines: The lines to get angles from (from `HoughLinesP`, as tuples of [x1, y1, x2, y2]).
@@ -191,19 +251,19 @@ def get_angles(lines: np.ndarray[tuple[tuple[float, float, float, float]]]) -> l
     """
     ret = []
 
-    for i in range(0, len(lines)):
-        for j in range(i, len(lines)):
-            x11, y11, x21, y21 = lines[i][0]
-            x12, y12, x22, y22 = lines[j][0]
+    for i in range(0, len(linelabels)):
+        for j in range(i, len(linelabels)):
+            x11, y11, x21, y21 = linelabels[i][0][0]
+            x12, y12, x22, y22 = linelabels[j][0][0]
 
             # Calculate angle between lines
             t1 = np.arctan2(x21 - x11, y21 - y11)
             t2 = np.arctan2(x22 - x12, y22 - y12)
             t = (t2 - t1) % (2 * np.pi)
+            if anglecheck(t,FLAKE_ANGLE_TOLERANCE_RADS):
+                label=linelabels[i][1]+linelabels[j][1]
+                ret.append([t,label])
 
-            if t % (np.pi / 6) > FLAKE_ANGLE_TOLERANCE_RADS or t < (np.pi / 6) - FLAKE_ANGLE_TOLERANCE_RADS or t > 2 * np.pi - FLAKE_ANGLE_TOLERANCE_RADS:
+            else:
                 continue
-
-            ret.append(t)
-
     return ret
